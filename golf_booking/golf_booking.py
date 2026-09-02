@@ -21,9 +21,7 @@ def fetch_golfpang_all_pages() -> list[dict]:
 
     all_results = []
     
-    # 1페이지부터 최대 20페이지까지 반복 (안전장치)
     for page in range(1, 21):
-        # 첨부해주신 페이로드(Payload) 적용
         payload = {
             "pageNum": str(page),
             "bkOrder": "",
@@ -43,7 +41,6 @@ def fetch_golfpang_all_pages() -> list[dict]:
             soup = BeautifulSoup(response.text, 'html.parser')
             rows = soup.select('table.type11 tbody tr')
             
-            # 해당 페이지에 데이터가 없으면(끝 페이지 도달 시) 반복문 종료
             if not rows:
                 break
                 
@@ -56,51 +53,51 @@ def fetch_golfpang_all_pages() -> list[dict]:
                 weekday_str = row.select_one('span.weekdays').text.strip().replace(',', '')
                 weekend_str = row.select_one('span.weekend').text.strip().replace(',', '')
                 
-                # 빈 값 처리 후 정수 변환
                 weekday_price = int(weekday_str) if weekday_str.isdigit() else 0
                 weekend_price = int(weekend_str) if weekend_str.isdigit() else 0
                 
-                all_results.append({
-                    "골프장명": name,
-                    "주중그린피": weekday_price,
-                    "주말그린피": weekend_price,
-                    "기본카트비": 100000, # 임의의 팀당 기본 카트비
-                    "기본캐디피": 150000  # 임의의 팀당 기본 캐디피
-                })
+                if weekday_price > 0 or weekend_price > 0:
+                    all_results.append({
+                        "골프장명": name,
+                        "주중그린피": weekday_price,
+                        "주말그린피": weekend_price,
+                        "기본카트비": 100000, 
+                        "기본캐디피": 150000  
+                    })
             
-            # 서버에 부담을 주지 않기 위해 페이지 요청 간 0.5초 대기
             time.sleep(0.5)
 
         except Exception as e:
-            st.error(f"데이터 수집 중 오류 발생 (페이지 {page}): {e}")
+            st.error(f"데이터 수집 중 오류 발생: {e}")
             break
             
     return all_results
 
 # ---------------------------------------------------------
-# 2. 비용 계산 함수
+# 2. 비용 계산 및 지도 링크 생성 함수
 # ---------------------------------------------------------
-def calculate_total_costs(courses: list[dict], team_size: int = 4) -> pd.DataFrame:
-    """1인당 카트비/캐디피를 분할하여 실결제 총비용을 계산합니다."""
+def calculate_total_costs(courses: list[dict], team_size: int) -> pd.DataFrame:
+    """1인당 카트비/캐디피를 분할하여 실결제 총비용 및 지도 검색 링크를 산출합니다."""
     df = pd.DataFrame(courses)
     if df.empty:
         return df
 
-    # 1/N 계산
     df["1인_카트비"] = df["기본카트비"] / team_size
     df["1인_캐디피"] = df["기본캐디피"] / team_size
     
-    # 1인 총비용 산출
     df["주중_총비용(1인)"] = df["주중그린피"] + df["1인_카트비"] + df["1인_캐디피"]
     df["주말_총비용(1인)"] = df["주말그린피"] + df["1인_카트비"] + df["1인_캐디피"]
 
-    # 필요한 컬럼만 정리 및 주중 총비용 기준 오름차순 정렬
+    # 이름에서 대괄호 '[' ']' 를 제거하여 검색 정확도 향상
+    clean_names = df['골프장명'].str.replace('[', '', regex=False).str.replace(']', '', regex=False)
+    # 네이버 지도 검색 URL 생성
+    df['지도보기'] = "https://map.naver.com/v5/search/" + clean_names + "%20골프장"
+
     columns = [
         "골프장명", "주중그린피", "주말그린피", 
         "1인_카트비", "1인_캐디피", 
-        "주중_총비용(1인)", "주말_총비용(1인)"
+        "주중_총비용(1인)", "주말_총비용(1인)", "지도보기"
     ]
-    
     return df[columns].sort_values(by="주중_총비용(1인)", ascending=True).reset_index(drop=True)
 
 # ---------------------------------------------------------
@@ -108,40 +105,90 @@ def calculate_total_costs(courses: list[dict], team_size: int = 4) -> pd.DataFra
 # ---------------------------------------------------------
 st.set_page_config(page_title="실시간 골프장 가격 비교", page_icon="⛳", layout="wide")
 
+if "raw_data" not in st.session_state:
+    st.session_state.raw_data = []
+
 st.title("⛳ 실시간 골프장 1인 총비용 비교")
-st.markdown("현재 웹사이트에 등록된 **모든 골프장의 데이터를 실시간으로 수집**하여, 카트비와 캐디피를 포함한 '진짜 1인당 총비용'을 계산합니다.")
+st.markdown("데이터를 한 번 수집한 후에는 **인원수를 변경해도 실시간으로 즉각 계산**됩니다.")
 
 with st.sidebar:
-    st.header("🔍 검색 옵션")
-    team_size = st.number_input("팀 인원 (명)", min_value=1, max_value=4, value=4)
-    search_button = st.button("실시간 데이터 수집 및 비교", type="primary")
+    st.header("🔍 설정 및 수집")
+    
+    if st.button("🔄 실시간 데이터 긁어오기", type="primary"):
+        with st.spinner("웹사이트에서 데이터를 수집 중입니다..."):
+            st.session_state.raw_data = fetch_golfpang_all_pages()
+            st.success("데이터 수집 완료!")
+            
+    st.divider()
+    
+    team_size = st.slider(
+        "👥 현재 팀 인원 설정", 
+        min_value=1, max_value=4, value=4, 
+        help="인원을 변경하면 1인당 부담할 카트비와 캐디피가 즉시 재계산됩니다."
+    )
 
-if search_button:
-    with st.spinner("서버에서 모든 페이지의 데이터를 긁어오는 중입니다... (약 3~5초 소요)"):
-        # 1. 크롤링 실행
-        raw_data = fetch_golfpang_all_pages()
+if st.session_state.raw_data:
+    result_df = calculate_total_costs(st.session_state.raw_data, team_size)
+    
+    if not result_df.empty:
+        st.subheader("🏆 현재 조건 최저가 골프장")
         
-        if not raw_data:
-            st.warning("수집된 데이터가 없습니다.")
-        else:
-            # 2. 비용 계산
-            result_df = calculate_total_costs(raw_data, team_size=team_size)
-            
-            # 3. 화면 출력
-            st.success(f"성공! 총 {len(result_df)}개의 골프장 데이터를 수집했습니다. (주중 총비용 저렴한 순)")
-            
-            # 금액 포맷팅 (보기 좋게 콤마 추가)
-            format_mapping = {
-                "주중그린피": "{:,.0f} 원",
-                "주말그린피": "{:,.0f} 원",
-                "1인_카트비": "{:,.0f} 원",
-                "1인_캐디피": "{:,.0f} 원",
-                "주중_총비용(1인)": "{:,.0f} 원",
-                "주말_총비용(1인)": "{:,.0f} 원"
-            }
-            
-            st.dataframe(
-                result_df.style.format(format_mapping),
-                use_container_width=True,
-                height=600
+        min_weekday_idx = result_df['주중_총비용(1인)'].idxmin()
+        min_weekend_idx = result_df['주말_총비용(1인)'].idxmin()
+        
+        cheapest_weekday = result_df.iloc[min_weekday_idx]
+        cheapest_weekend = result_df.iloc[min_weekend_idx]
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric(
+                label="☀️ 주중 최저가 (1인 총액)", 
+                value=f"{cheapest_weekday['주중_총비용(1인)']:,.0f} 원",
+                delta=cheapest_weekday['골프장명'],
+                delta_color="off"
             )
+        with col2:
+            st.metric(
+                label="🌈 주말 최저가 (1인 총액)", 
+                value=f"{cheapest_weekend['주말_총비용(1인)']:,.0f} 원",
+                delta=cheapest_weekend['골프장명'],
+                delta_color="off"
+            )
+            
+        st.divider()
+        st.write(f"총 **{len(result_df)}**개의 골프장 데이터가 있습니다. (단위: 원)")
+        
+        format_mapping = {
+            "주중그린피": "{:,.0f}",
+            "주말그린피": "{:,.0f}",
+            "1인_카트비": "{:,.0f}",
+            "1인_캐디피": "{:,.0f}",
+            "주중_총비용(1인)": "{:,.0f}",
+            "주말_총비용(1인)": "{:,.0f}"
+        }
+        
+        # 글자색과 배경색을 동시에 지정하여 가독성 개선
+        def highlight_min_custom(s):
+            is_min = s == s.min()
+            return ['background-color: #FFE600; color: black; font-weight: bold;' if v else '' for v in is_min]
+        
+        styled_df = result_df.style.format(format_mapping).apply(
+            highlight_min_custom, 
+            subset=["주중_총비용(1인)", "주말_총비용(1인)"]
+        )
+        
+        # 표 출력 시 지도 링크를 클릭 가능한 버튼으로 설정
+        st.dataframe(
+            styled_df, 
+            use_container_width=True, 
+            height=600,
+            column_config={
+                "지도보기": st.column_config.LinkColumn(
+                    "🗺️ 위치 확인", 
+                    help="클릭하면 네이버 지도로 이동하여 위치를 확인합니다.",
+                    display_text="지도 열기 📍"
+                )
+            }
+        )
+else:
+    st.info("👈 왼쪽 사이드바에서 '실시간 데이터 긁어오기' 버튼을 눌러주세요.")
